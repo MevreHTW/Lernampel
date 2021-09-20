@@ -1,0 +1,255 @@
+// Sound Sensor
+#define SoundSensorPin A0
+#define VREF 5.0
+
+float voltageValue, dbValue;
+
+// Werte zum Berechnen des durchschnittlichen Lärmpegels
+int intDbValue;
+int sumDbValues = 0;
+int numberOfValues = 0;
+int averageDbValue = 0;
+
+// Diese Werte (in db) anpassen um die Grenzen der Ampel zu verändern
+// Ein Geräuschpegel unter diesem Wert wird als grün angezeigt
+float green = 70.0;
+// Ein Geräuschpegel unter diesem Wert und über dem green Wert wird als gelb angezeigt
+float yellow = 80.0;
+// Ein Geräuschpegel über diesem Wert wird als rot angezeigt (sollte dem yellow Wert entsprechen)
+float red = 80.0;
+
+// LED Ring
+#include <Adafruit_NeoPixel.h>
+#ifdef __AVR__
+ #include <avr/power.h> // Required for 16 MHz Adafruit Trinket
+#endif
+#define LedPin 5
+#define NumberOfPixels 20
+
+Adafruit_NeoPixel pixels(NumberOfPixels, LedPin, NEO_GRB + NEO_KHZ800);
+
+//LoRaWAN (c) 2015 Thomas Telkamp and Matthijs Kooijman
+#include <lmic.h>
+#include <hal/hal.h>
+#include <ESP8266WiFi.h>
+
+const lmic_pinmap lmic_pins = {  
+  .nss = 2,                            // Connected to pin D
+  .rxtx = LMIC_UNUSED_PIN,             // For placeholder only, Do not connected on RFM92/RFM95
+  .rst = LMIC_UNUSED_PIN,              // Needed on RFM92/RFM95? (probably not) D0/GPIO16 
+  .dio = {
+    15, 15, LMIC_UNUSED_PIN         }
+};
+
+// Hier die Werte für DevEUI, AppEUI, AppKey aus The Things Network -> End device eintragen
+static const u1_t PROGMEM DEVEUI[8]={
+  0xBD,0x46,0x04,0xD0,0x7E,0xD5,0xB3,0x70};
+void os_getDevEui (u1_t* buf) { 
+  memcpy_P(buf, DEVEUI, 8);
+}
+
+static const u1_t PROGMEM APPEUI[8]={
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+void os_getArtEui (u1_t* buf) { 
+  memcpy_P(buf, APPEUI, 8);
+}
+
+static const u1_t PROGMEM APPKEY[16]={
+  0xA3,0x08,0x97,0x62,0xA4,0xB6,0x7F,0x48,0x05,0xD2,0xE5,0x63,0xBE,0x31,0xE3,0x31};
+void os_getDevKey (u1_t* buf) {  
+  memcpy_P(buf, APPKEY, 16);
+};
+
+volatile int LoRaWAN_Tx_Ready      = 0; // Merker für ACK 
+
+// Timer für Versand mit LoRaWAN
+unsigned long lastMillis;
+
+int LoRaWAN_Rx_Payload = 0 ;
+// -------- LoRa Event 
+void onEvent (ev_t ev) { 
+  Serial.print(os_getTime());
+  Serial.print(": ");
+  switch(ev) {
+  case EV_SCAN_TIMEOUT:
+    Serial.println(F("EV_SCAN_TIMEOUT"));
+    break;
+  case EV_BEACON_FOUND:
+    Serial.println(F("EV_BEACON_FOUND"));
+    break;
+  case EV_BEACON_MISSED:
+    Serial.println(F("EV_BEACON_MISSED"));
+    break;
+  case EV_BEACON_TRACKED:
+    Serial.println(F("EV_BEACON_TRACKED"));
+    break;
+  case EV_JOINING:
+    Serial.println(F("EV_JOINING"));
+    break;
+  case EV_JOINED:
+    Serial.println(F("EV_JOINED"));
+    // Disable link check validation (automatically enabled
+    // during join, but not supported by TTN at this time).
+    LMIC_setLinkCheckMode(0);
+    break;
+  case EV_RFU1:
+    Serial.println(F("EV_RFU1"));
+    break;
+  case EV_JOIN_FAILED:
+    Serial.println(F("EV_JOIN_FAILED"));
+    break;
+  case EV_REJOIN_FAILED:
+    Serial.println(F("EV_REJOIN_FAILED"));
+    break;
+    break;
+  case EV_TXCOMPLETE:
+    Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+    if (LMIC.txrxFlags & TXRX_ACK)
+      Serial.println(F("Received ack"));
+    if (LMIC.dataLen) {
+      Serial.println(F("Received "));
+      Serial.println(LMIC.dataLen);
+      Serial.println(F(" bytes of payload"));
+      LoRaWAN_Rx_Payload = 0; 
+      for (int i = 0;i<LMIC.dataLen;i++) { 
+        Serial.println(LMIC.frame[i+ LMIC.dataBeg],HEX);
+        LoRaWAN_Rx_Payload = 256*LoRaWAN_Rx_Payload+LMIC.frame[i+ LMIC.dataBeg];
+      }
+    }
+    LoRaWAN_Tx_Ready = 1;
+    // Schedule next transmission
+    //os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
+    break;
+  case EV_LOST_TSYNC:
+    Serial.println(F("EV_LOST_TSYNC"));
+    break;
+  case EV_RESET:
+    Serial.println(F("EV_RESET"));
+    break;
+  case EV_RXCOMPLETE:
+    // data received in ping slot
+    Serial.println(F("EV_RXCOMPLETE"));
+    break;
+  case EV_LINK_DEAD:
+    Serial.println(F("EV_LINK_DEAD"));
+    break;
+  case EV_LINK_ALIVE:
+    Serial.println(F("EV_LINK_ALIVE"));
+    break;
+  case EV_TXSTART:
+    Serial.println(F("EV_TXSTART"));
+    break;
+  case EV_JOIN_TXCOMPLETE:
+    Serial.println(F("EV_JOIN_TXCOMPLETE"));
+    break;
+  default:
+    Serial.println(F("Unknown event"));
+    break;
+  }
+}
+
+// Dieser Code wird nur einmalig zu Beginn durchlaufen
+void setup() {
+  WiFi.forceSleepBegin();
+  Serial.begin(115200);
+    // -- Initialisiere LoraWAN 
+  os_init();             // LMIC LoraWAN
+  LMIC_reset();          // Reset the MAC state 
+  LMIC.txpow = 27;       // Maximum TX power 
+  LMIC.datarate=DR_SF12; // Long Range
+  LMIC.rps = updr2rps(LMIC.datarate);
+  pixels.begin();
+  pixels.setBrightness(255);
+}
+
+// Dieser Code wird in einer Endlosschleife immer wieder durchlaufen 
+void loop() {
+
+  // Bestimmung der Lautstärke
+  voltageValue = analogRead(SoundSensorPin) / 1024.0 * VREF;
+  dbValue = voltageValue * 50.0;
+  intDbValue = (int)dbValue;
+  Serial.print(dbValue,1);
+  Serial.println(" dBA");
+
+  // Licht wird je nach Lautstärke verändert
+  if (dbValue < green) {
+    Serial.println("light green");
+
+    for(int pixel=0; pixel<NumberOfPixels; pixel++) {
+      pixels.setPixelColor(pixel, pixels.Color(0, 150, 0));
+      pixels.show();
+    } 
+  }
+  if (dbValue > green && dbValue < yellow) {
+    Serial.println("light yellow");
+
+    for(int pixel=0; pixel<NumberOfPixels; pixel++) {
+      pixels.setPixelColor(pixel, pixels.Color(255, 255, 0));
+      pixels.show();
+    }
+  }
+  if (dbValue > red) {
+    Serial.println("light red");
+
+    for(int pixel=0; pixel<NumberOfPixels; pixel++) {
+      pixels.setPixelColor(pixel, pixels.Color(255, 0, 0));
+      pixels.show();
+    }
+  }
+
+  // Wird benötigt um die durchschnittliche Lautstärke zu ermitteln
+  sumDbValues = sumDbValues + intDbValue;
+  numberOfValues++;
+  Serial.println("Anzahl der Werte:");
+  Serial.println(numberOfValues);
+  Serial.println("Summe der Db Werte:");
+  Serial.println(sumDbValues);
+
+  // Die Lautstärke wird alle 250ms gemessen
+  delay(250);
+
+  // Nach einer Minute wird die durchschnittliche Lautstärke ermittelt und versendet
+  if (millis() - lastMillis >= 60 * 1000UL) {
+    Serial.println("Senden beginnt");
+    Serial.println(millis());
+    Serial.println(lastMillis);
+    averageDbValue = sumDbValues / numberOfValues;
+    Serial.println("Gesendeter Durchschnittswert:");
+    Serial.println(averageDbValue);
+
+    // Während die Daten versendet werden, schaltet die Ampel auf blau
+    for(int pixel=0; pixel<NumberOfPixels; pixel++) {
+      pixels.setPixelColor(pixel, pixels.Color(0, 0, 255));
+      pixels.show();
+    }
+        
+    { //Block------------------------------ sende Daten an TTN  
+      int port = 1;
+      static uint8_t mydata[1];
+      mydata[0] = averageDbValue;
+      // Check if there is not a current TX/RX job running
+      //if (LMIC.opmode & OP_TXRXPEND) {
+      if (LMIC.opmode & (1 << 7)) { 
+        Serial.println(F("OP_TXRXPEND, not sending"));
+      } 
+      else {
+        // Prepare upstream data transmission at the next possible time.
+        LoRaWAN_Tx_Ready = 0;                                 // Merker für ACK
+        LMIC_setTxData2(port, mydata, sizeof(mydata), 0);     // Sende         
+        Serial.println(F("Packet queued"));
+        while(LoRaWAN_Tx_Ready==0) {
+          yield();
+          os_runloop_once();
+        };  // Warte bis gesendet
+      }
+  } // Blockende
+
+  // Die Werte werden zurückgesetzt und die Schleife beginnt von vorne
+  sumDbValues = 0;
+  numberOfValues = 0;
+  lastMillis = millis();
+  Serial.println("Senden beendet");
+  Serial.println(lastMillis);
+  }
+}
